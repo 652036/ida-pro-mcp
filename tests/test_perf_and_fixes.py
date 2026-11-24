@@ -503,6 +503,16 @@ class RpcAndHttpCacheTests(unittest.TestCase):
                 http_mod._sync_cors_policy(DummyServer.mcp_server)
                 self.assertEqual(retry_reads, 2)
                 self.assertIsNone(DummyServer.mcp_server.cors_allowed_origins)
+
+                # Transient timeout / error during cold Origin lookup returns 503 instead of closing socket.
+                http_mod.invalidate_cors_policy_cache()
+                http_mod.config_json_get = lambda _k, _d=None: (_ for _ in ()).throw(
+                    TimeoutError("pump timed out")
+                )
+                handler.headers = {"Origin": "http://example.com"}
+                errors_sent.clear()
+                self.assertFalse(handler._check_api_request())
+                self.assertEqual(errors_sent[-1][0], 503)
             finally:
                 pump._current = orig_current_job
                 http_mod.McpHttpRequestHandler.setup = orig_setup
@@ -986,6 +996,30 @@ class ModifyBatchAndRefreshTests(unittest.TestCase):
             self.assertEqual(out_dry["func"][0]["dir"], "vibe")
             self.assertEqual(dirtree_stats["load"], 0)
 
+            # Single link exception affects only that item while later links and save proceed.
+            orig_link = fake_tree.link
+
+            def flaky_link(ea):
+                if ea == 0x1000:
+                    raise RuntimeError("link boom")
+                return orig_link(ea)
+
+            fake_tree.link = flaky_link
+            dirtree_stats["linked"].clear()
+            dirtree_stats["save"] = 0
+            out_link_err = api_modify.rename.__wrapped__(
+                {
+                    "func": [
+                        {"addr": "0x1000", "name": "fn_a_fail"},
+                        {"addr": "0x2000", "name": "fn_b_ok"},
+                    ]
+                }
+            )
+            self.assertIn("link boom", out_link_err["func"][0]["dir_error"])
+            self.assertEqual(out_link_err["func"][1]["dir"], "vibe")
+            self.assertEqual(dirtree_stats["linked"], [0x2000])
+            self.assertEqual(dirtree_stats["save"], 1)
+
             # Dirtree exception preserves applied rename results and sets dir_error.
             fake_tree.load = lambda: (_ for _ in ()).throw(RuntimeError("dirtree crashed"))
             out_err = api_modify.rename.__wrapped__(
@@ -1057,6 +1091,15 @@ class QueryAnalysisAndCompositeTests(unittest.TestCase):
             self.assertEqual(len(lf_all[0]["data"]), 4)
             self.assertEqual(len(lf_all[1]["data"]), 2)
             self.assertIsNone(lf_all[0]["next_offset"])
+            self.assertEqual(fn_lookup_calls, 4)
+
+            # Mixed unfiltered + filtered batch also calls get_function only once per function.
+            fn_lookup_calls = 0
+            lf_mixed = api_core.list_funcs.__wrapped__(
+                [{"offset": 0, "count": 0}, {"filter": "fn_11*", "offset": 0, "count": 10}]
+            )
+            self.assertEqual(len(lf_mixed[0]["data"]), 4)
+            self.assertEqual([x["addr"] for x in lf_mixed[1]["data"]], ["0x1100"])
             self.assertEqual(fn_lookup_calls, 4)
 
             # func_query without has_type calls get_tinfo ONLY on returned slice (1 instead of 4)

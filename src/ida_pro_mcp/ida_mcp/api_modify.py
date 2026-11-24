@@ -539,7 +539,11 @@ def rename(
                         res["dir_error"] = "Failed to chdir to vibe"
                     return
                 for ea, res in targets:
-                    err = tree.link(ea)
+                    try:
+                        err = tree.link(ea)
+                    except Exception as link_exc:
+                        res["dir_error"] = str(link_exc)
+                        continue
                     if err not in (ida_dirtree.DTE_OK, ida_dirtree.DTE_ALREADY_EXISTS):
                         res["dir_error"] = f"link failed: {err}"
                     else:

@@ -228,7 +228,11 @@ class IdaMcpHttpRequestHandler(McpHttpRequestHandler):
             if _cached_cors_policy is None and get_pump().busy_status() is not None:
                 self.send_error(503, "Database busy; retry once IDB open completes")
                 return False
-            self.update_cors_policy()
+            try:
+                self.update_cors_policy()
+            except Exception:
+                self.send_error(503, "Database busy; retry once IDB open completes")
+                return False
         return super()._check_api_request()
 
     def update_cors_policy(self, refresh: bool = False):

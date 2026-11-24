@@ -591,15 +591,14 @@ def list_funcs(
         1 for q in queries if q.get("filter", "") in ("", "*")
     )
     remaining_filtered = len(queries) - remaining_unfiltered
-    reuse_across_queries = len(queries) > 1
+    use_shared_all = len(queries) > 1 and remaining_filtered > 0
+    reuse_unfiltered = len(queries) > 1 and not use_shared_all
     func_eas: list[int] | None = None
-    func_cache: dict[int, Function] | None = (
-        {} if reuse_across_queries and remaining_unfiltered > 0 else None
-    )
+    func_cache: dict[int, Function] | None = {} if reuse_unfiltered else None
     all_functions: list[Function] | None = None
 
     def get_func_entry(addr: int) -> Function:
-        if func_cache is not None and remaining_filtered == 0:
+        if func_cache is not None:
             fn = func_cache.get(addr)
             if fn is None:
                 fn = get_function(addr)
@@ -608,19 +607,30 @@ def list_funcs(
         return get_function(addr)
 
     results = []
-    for query in queries:
+    last_idx = len(queries) - 1
+    for idx, query in enumerate(queries):
         offset = query.get("offset", 0)
         count = query.get("count", 100)
         filter_pattern = query.get("filter", "")
+
+        if use_shared_all:
+            if all_functions is None:
+                all_functions = [get_function(addr) for addr in idautils.Functions()]
+            rows_source = (
+                all_functions
+                if filter_pattern in ("", "*")
+                else pattern_filter(all_functions, filter_pattern, "name")
+            )
+            results.append(paginate(rows_source, offset, count))
+            if idx == last_idx:
+                all_functions = None
+            continue
 
         # Treat empty/"*" filter as "all"
         if filter_pattern in ("", "*"):
             remaining_unfiltered -= 1
             eas = func_eas if func_eas is not None else list(idautils.Functions())
-            if reuse_across_queries and (remaining_unfiltered > 0 or remaining_filtered > 0):
-                func_eas = eas
-            else:
-                func_eas = None
+            func_eas = eas if reuse_unfiltered and remaining_unfiltered > 0 else None
             total = len(eas)
             eff_count = total if count == 0 else count
             next_offset = offset + eff_count
@@ -639,23 +649,12 @@ def list_funcs(
                 func_cache.clear()
             continue
 
-        remaining_filtered -= 1
-        if all_functions is None:
-            eas_iter = func_eas if func_eas is not None else idautils.Functions()
-            if remaining_filtered > 0:
-                all_functions = [get_function(addr) for addr in eas_iter]
-                rows_source = all_functions
-            else:
-                rows_source = [get_function(addr) for addr in eas_iter]
-        else:
-            rows_source = all_functions
-            if remaining_filtered == 0:
-                all_functions = None
-
-        if remaining_unfiltered == 0 and remaining_filtered == 0:
-            func_eas = None
-
-        filtered = pattern_filter(rows_source, filter_pattern, "name")
+        # Single filtered query: one collection, no extra caches.
+        filtered = pattern_filter(
+            [get_function(addr) for addr in idautils.Functions()],
+            filter_pattern,
+            "name",
+        )
         results.append(paginate(filtered, offset, count))
 
     return results
